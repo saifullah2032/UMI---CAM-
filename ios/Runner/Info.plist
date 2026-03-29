@@ -45,5 +45,16 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	
+	<!-- UMI 海 - CAM Permissions -->
+	<!-- Camera permission for dual-camera recording -->
+	<key>NSCameraUsageDescription</key>
+	<string>UMI 海 - CAM needs camera access to record dual-camera videos and capture photos.</string>
+	<!-- Microphone permission for audio recording -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>UMI 海 - CAM needs microphone access to record audio with your videos.</string>
+	<!-- Photo library permission for saving media -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>UMI 海 - CAM needs photo library access to save your recorded videos and photos.</string>
 </dict>
 </plist>

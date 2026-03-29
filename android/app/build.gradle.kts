@@ -20,21 +20,51 @@ android {
     }
 
     defaultConfig {
-        // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId = "com.example.umi_cam"
-        // You can update the following values to match your application needs.
-        // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
-        versionName = flutter.versionName
+        versionCode = 1
+        versionName = "1.0.0"
+        
+        // Optimize for performance
+        vectorDrawables {
+            useSupportLibrary = true
+        }
+        
+        // Ensure compatibility with native Camera2 API
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     buildTypes {
         release {
+            // Enable code shrinking, obfuscation, and optimization
+            isMinifyEnabled = true
+            isShrinkResources = true
+            
+            // ProGuard/R8 configuration for production
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            
             // TODO: Add your own signing config for the release build.
             // Signing with the debug keys for now, so `flutter run --release` works.
             signingConfig = signingConfigs.getByName("debug")
+        }
+        
+        debug {
+            isDebuggable = true
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+        }
+    }
+    
+    // Optimize APK packaging
+    packaging {
+        resources {
+            excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
     }
 }

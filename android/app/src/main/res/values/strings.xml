@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- App name and branding -->
+    <string name="app_name">UMI 海 CAM</string>
+    <string name="app_description">Professional dual-camera recording with Industrial Ocean design</string>
+    
+    <!-- Permission rationales for user-friendly explanations -->
+    <string name="camera_permission_title">Camera Access Required</string>
+    <string name="camera_permission_message">UMI 海 CAM needs access to your front and back cameras to capture dual-camera videos and photos with picture-in-picture and side-by-side layouts.</string>
+    
+    <string name="microphone_permission_title">Microphone Access Required</string>
+    <string name="microphone_permission_message">UMI 海 CAM needs access to your microphone to record high-quality stereo audio synchronized with your dual-camera videos.</string>
+    
+    <string name="storage_permission_title">Storage Access Required</string>
+    <string name="storage_permission_message">UMI 海 CAM needs access to your device storage to save recorded videos and photos, and to display your media gallery.</string>
+    
+    <!-- Settings and features -->
+    <string name="smart_selfie_description">Automatically crops front camera to 16:9 aspect ratio for cinematic selfie recording</string>
+    <string name="video_quality_description">Choose recording quality: LOW (480p), MED (720p), or HIGH (1080p)</string>
+    <string name="layout_description">Select default camera layout: Picture-in-Picture or Side-by-Side</string>
+    
+    <!-- Error messages -->
+    <string name="camera_initialization_failed">Failed to initialize camera system. Please ensure camera permissions are granted and restart the app.</string>
+    <string name="recording_failed">Recording failed. Please check available storage space and try again.</string>
+    <string name="dual_camera_not_supported">Dual camera recording is not supported on this device. Single camera mode is available.</string>
+    
+    <!-- Navigation and UI -->
+    <string name="home_tab">Home</string>
+    <string name="gallery_tab">Gallery</string>
+    <string name="settings_tab">Settings</string>
+    
+    <!-- Control Center -->
+    <string name="control_center_title">CONTROL CENTER</string>
+    <string name="video_quality_title">VIDEO QUALITY</string>
+    <string name="camera_layout_title">CAMERA LAYOUT</string>
+    <string name="system_config_title">SYSTEM CONFIG</string>
+    
+    <!-- Hardware diagnostics -->
+    <string name="hardware_diagnostics_title">HARDWARE DIAGNOSTICS</string>
+    <string name="system_status">System Status</string>
+    <string name="dual_camera_support">Dual Camera</string>
+    <string name="device_model">Device Model</string>
+</resources>
