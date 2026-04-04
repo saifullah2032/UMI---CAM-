@@ -103,9 +103,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 valueColor: AlwaysStoppedAnimation<Color>(OceanColors.mint),
               ),
             ),
-            
+
             SizedBox(height: 24),
-            
+
             Text(
               'INITIALIZING CONTROL CENTER...',
               style: TextStyle(
@@ -147,9 +147,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 fontFamily: 'Archivo Black',
               ),
             ),
-            
+
             const SizedBox(height: 16),
-            
+
             Text(
               settingsProvider.errorMessage!,
               textAlign: TextAlign.center,
@@ -159,13 +159,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 letterSpacing: 1,
               ),
             ),
-            
+
             const SizedBox(height: 24),
-            
+
             GestureDetector(
               onTap: () => settingsProvider.initialize(),
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 12,
+                ),
                 decoration: const BoxDecoration(
                   color: OceanColors.steel,
                   border: Border.fromBorderSide(OceanTheme.brutalistBorder),
@@ -202,32 +205,32 @@ class _SettingsScreenState extends State<SettingsScreen> {
             icon: Icons.high_quality,
             child: _buildQualitySelector(settingsProvider),
           ),
-          
+
           const SizedBox(height: 24),
-          
+
           // Layout Configuration Panel
           _buildControlPanel(
             title: 'DEFAULT LAYOUT',
             icon: Icons.view_comfy,
             child: _buildLayoutSelector(settingsProvider),
           ),
-          
+
           const SizedBox(height: 24),
-          
+
           // Feature Switches Panel
           _buildControlPanel(
             title: 'FEATURE SWITCHES',
             icon: Icons.tune,
             child: _buildFeatureSwitches(settingsProvider),
           ),
-          
+
           const SizedBox(height: 24),
-          
+
           // Hardware Diagnostic Plaque
           _buildHardwareDiagnosticPlaque(),
-          
+
           const SizedBox(height: 24),
-          
+
           // About Section
           _buildAboutSection(),
         ],
@@ -264,15 +267,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   color: OceanColors.steel,
                   border: Border.fromBorderSide(OceanTheme.brutalistBorder),
                 ),
-                child: Icon(
-                  icon,
-                  size: 18,
-                  color: Colors.white,
-                ),
+                child: Icon(icon, size: 18, color: Colors.white),
               ),
-              
+
               const SizedBox(width: 12),
-              
+
               Text(
                 title,
                 style: const TextStyle(
@@ -285,9 +284,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ],
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           // Panel content
           child,
         ],
@@ -310,18 +309,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             letterSpacing: 1,
           ),
         ),
-        
+
         const SizedBox(height: 12),
-        
+
         Row(
-          children: VideoQuality.values.map((quality) => 
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _buildQualityBlock(quality, settingsProvider),
-              ),
-            ),
-          ).toList(),
+          children: VideoQuality.values
+              .map(
+                (quality) => Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _buildQualityBlock(quality, settingsProvider),
+                  ),
+                ),
+              )
+              .toList(),
         ),
       ],
     );
@@ -329,21 +330,33 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   /**
    * Individual quality block with sinking animation
+   * Shadow goes from 6px to 0px with 4px downward transform on tap
    */
-  Widget _buildQualityBlock(VideoQuality quality, SettingsProvider settingsProvider) {
+  Widget _buildQualityBlock(
+    VideoQuality quality,
+    SettingsProvider settingsProvider,
+  ) {
     final isSelected = settingsProvider.videoQuality == quality;
-    
+
     return GestureDetector(
       onTap: () => settingsProvider.setVideoQuality(quality),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+        transform: Matrix4.translationValues(0, isSelected ? 4 : 0, 0),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF7AB2D3) : OceanColors.mint, // Ocean Blue when selected
+          color: isSelected
+              ? const Color(0xFF7AB2D3)
+              : OceanColors.mint, // Ocean Blue when selected
           border: const Border.fromBorderSide(OceanTheme.brutalistBorder),
-          boxShadow: isSelected 
-              ? [] // No shadow when "sunk" into screen
-              : [const BoxShadow(color: Colors.black, offset: Offset(5, 5), blurRadius: 0)],
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black,
+              offset: Offset(0, isSelected ? 0 : 6),
+              blurRadius: 0,
+              spreadRadius: 0,
+            ),
+          ],
         ),
         child: Column(
           children: [
@@ -357,9 +370,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 fontFamily: 'Archivo Black',
               ),
             ),
-            
+
             const SizedBox(height: 4),
-            
+
             Text(
               quality.description,
               style: TextStyle(
@@ -390,18 +403,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
             letterSpacing: 1,
           ),
         ),
-        
+
         const SizedBox(height: 12),
-        
+
         Row(
-          children: DefaultLayout.values.map((layout) => 
-            Expanded(
-              child: Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: _buildLayoutBlock(layout, settingsProvider),
-              ),
-            ),
-          ).toList(),
+          children: DefaultLayout.values
+              .map(
+                (layout) => Expanded(
+                  child: Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: _buildLayoutBlock(layout, settingsProvider),
+                  ),
+                ),
+              )
+              .toList(),
         ),
       ],
     );
@@ -410,9 +425,12 @@ class _SettingsScreenState extends State<SettingsScreen> {
   /**
    * Individual layout block
    */
-  Widget _buildLayoutBlock(DefaultLayout layout, SettingsProvider settingsProvider) {
+  Widget _buildLayoutBlock(
+    DefaultLayout layout,
+    SettingsProvider settingsProvider,
+  ) {
     final isSelected = settingsProvider.defaultLayout == layout;
-    
+
     return GestureDetector(
       onTap: () => settingsProvider.setDefaultLayout(layout),
       child: Container(
@@ -425,15 +443,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
         child: Column(
           children: [
             Icon(
-              layout == DefaultLayout.pip 
-                  ? Icons.picture_in_picture_alt 
+              layout == DefaultLayout.pip
+                  ? Icons.picture_in_picture_alt
                   : Icons.view_column,
               color: Colors.white,
               size: 24,
             ),
-            
+
             const SizedBox(height: 8),
-            
+
             Text(
               layout.shortName,
               style: const TextStyle(
@@ -451,8 +469,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /**
-   * Feature switches with Industrial toggles
-   */
+    * Feature switches with Industrial toggles
+    */
   Widget _buildFeatureSwitches(SettingsProvider settingsProvider) {
     return Column(
       children: [
@@ -463,9 +481,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
           value: settingsProvider.isSmartSelfieEnabled,
           onChanged: (value) => settingsProvider.setSmartSelfieEnabled(value),
         ),
-        
+
         const SizedBox(height: 16),
-        
+
+        // Microphone Audio Switch
+        IndustrialSwitch(
+          title: 'MICROPHONE AUDIO',
+          subtitle: 'Record audio from device microphone',
+          value: settingsProvider.isMicrophoneAudioEnabled,
+          onChanged: (value) =>
+              settingsProvider.setMicrophoneAudioEnabled(value),
+        ),
+
+        const SizedBox(height: 16),
+
         // Watermark Switch
         IndustrialSwitch(
           title: 'WATERMARK',
@@ -478,7 +507,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 
   /**
-   * Hardware diagnostic plaque with bolted metal plate styling
+   * Hardware diagnostic plaque with detailed camera and audio information
    */
   Widget _buildHardwareDiagnosticPlaque() {
     return Consumer<CameraCapabilityProvider>(
@@ -504,7 +533,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         height: 32,
                         decoration: const BoxDecoration(
                           color: OceanColors.warning,
-                          border: Border.fromBorderSide(OceanTheme.brutalistBorder),
+                          border: Border.fromBorderSide(
+                            OceanTheme.brutalistBorder,
+                          ),
                         ),
                         child: const Icon(
                           Icons.memory,
@@ -512,9 +543,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           color: Colors.black,
                         ),
                       ),
-                      
+
                       const SizedBox(width: 12),
-                      
+
                       const Text(
                         'HARDWARE DIAGNOSTICS',
                         style: TextStyle(
@@ -527,18 +558,45 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       ),
                     ],
                   ),
-                  
+
                   const SizedBox(height: 16),
-                  
-                  // Hardware info
-                  _buildDiagnosticRow('SYSTEM STATUS', capabilityProvider.systemStatusText),
-                  const SizedBox(height: 8),
-                  _buildDiagnosticRow('DUAL CAMERA', capabilityProvider.isDualCameraSupported ? 'SUPPORTED' : 'NOT SUPPORTED'),
-                  const SizedBox(height: 8),
-                   _buildDiagnosticRow('DEVICE MODEL', capabilityProvider.capabilities.deviceModel ?? 'Unknown'),
+
+                  // Hardware info rows
+                  _buildDiagnosticRow(
+                    'DEVICE',
+                    capabilityProvider.capabilities.deviceModel ??
+                        'Unknown Model',
+                  ),
+                  const SizedBox(height: 10),
+
+                  _buildDiagnosticRow(
+                    'FRONT CAMERA',
+                    capabilityProvider.capabilities.hasFrontCamera
+                        ? 'ACTIVE'
+                        : 'N/A',
+                  ),
+                  const SizedBox(height: 10),
+
+                  _buildDiagnosticRow(
+                    'BACK CAMERA',
+                    capabilityProvider.capabilities.hasBackCamera
+                        ? 'ACTIVE'
+                        : 'N/A',
+                  ),
+                  const SizedBox(height: 10),
+
+                  _buildDiagnosticRow(
+                    'DUAL CAMERA',
+                    capabilityProvider.capabilities.isDualCameraSupported
+                        ? 'SUPPORTED'
+                        : 'NOT SUPPORTED',
+                  ),
+                  const SizedBox(height: 10),
+
+                  _buildDiagnosticRow('AUDIO INPUT', 'MICROPHONE READY'),
                 ],
               ),
-              
+
               // Industrial bolts in corners
               _buildIndustrialBolts(),
             ],
@@ -566,12 +624,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
             ),
           ),
         ),
-        
-        const Text(
-          ': ',
-          style: TextStyle(color: Colors.white70),
-        ),
-        
+
+        const Text(': ', style: TextStyle(color: Colors.white70)),
+
         Expanded(
           child: Text(
             value,
@@ -594,32 +649,16 @@ class _SettingsScreenState extends State<SettingsScreen> {
     return Stack(
       children: [
         // Top-left bolt
-        const Positioned(
-          top: 8,
-          left: 8,
-          child: _IndustrialBolt(),
-        ),
-        
+        const Positioned(top: 8, left: 8, child: _IndustrialBolt()),
+
         // Top-right bolt
-        const Positioned(
-          top: 8,
-          right: 8,
-          child: _IndustrialBolt(),
-        ),
-        
+        const Positioned(top: 8, right: 8, child: _IndustrialBolt()),
+
         // Bottom-left bolt
-        const Positioned(
-          bottom: 8,
-          left: 8,
-          child: _IndustrialBolt(),
-        ),
-        
+        const Positioned(bottom: 8, left: 8, child: _IndustrialBolt()),
+
         // Bottom-right bolt
-        const Positioned(
-          bottom: 8,
-          right: 8,
-          child: _IndustrialBolt(),
-        ),
+        const Positioned(bottom: 8, right: 8, child: _IndustrialBolt()),
       ],
     );
   }
@@ -655,9 +694,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               ),
             ),
           ),
-          
+
           const SizedBox(height: 16),
-          
+
           const Text(
             'v1.0.0',
             style: TextStyle(
@@ -667,9 +706,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
               letterSpacing: 2,
             ),
           ),
-          
+
           const SizedBox(height: 8),
-          
+
           const Text(
             'Industrial Ocean Neo-Brutalism Design\nDual-Camera Recording Engine',
             textAlign: TextAlign.center,
@@ -723,9 +762,9 @@ class IndustrialSwitch extends StatelessWidget {
                     fontFamily: 'Archivo Black',
                   ),
                 ),
-                
+
                 const SizedBox(height: 4),
-                
+
                 Text(
                   subtitle,
                   style: const TextStyle(
@@ -737,7 +776,7 @@ class IndustrialSwitch extends StatelessWidget {
               ],
             ),
           ),
-          
+
           // Industrial toggle switch
           Container(
             width: 80,
@@ -745,7 +784,13 @@ class IndustrialSwitch extends StatelessWidget {
             decoration: BoxDecoration(
               color: value ? OceanColors.ocean : OceanColors.steel,
               border: const Border.fromBorderSide(OceanTheme.brutalistBorder),
-              boxShadow: const [BoxShadow(color: Colors.black, offset: Offset(4, 4), blurRadius: 0)],
+              boxShadow: const [
+                BoxShadow(
+                  color: Colors.black,
+                  offset: Offset(4, 4),
+                  blurRadius: 0,
+                ),
+              ],
             ),
             child: Stack(
               children: [
@@ -755,7 +800,9 @@ class IndustrialSwitch extends StatelessWidget {
                   height: double.infinity,
                   padding: const EdgeInsets.all(4),
                   child: Row(
-                    mainAxisAlignment: value ? MainAxisAlignment.end : MainAxisAlignment.start,
+                    mainAxisAlignment: value
+                        ? MainAxisAlignment.end
+                        : MainAxisAlignment.start,
                     children: [
                       // Switch handle
                       AnimatedContainer(
@@ -764,7 +811,9 @@ class IndustrialSwitch extends StatelessWidget {
                         height: 30,
                         decoration: const BoxDecoration(
                           color: Colors.white,
-                          border: Border.fromBorderSide(BorderSide(color: Colors.black, width: 2)),
+                          border: Border.fromBorderSide(
+                            BorderSide(color: Colors.black, width: 2),
+                          ),
                         ),
                         child: Icon(
                           value ? Icons.check : Icons.close,
@@ -798,11 +847,11 @@ class _IndustrialBolt extends StatelessWidget {
       decoration: const BoxDecoration(
         color: Colors.black54,
         shape: BoxShape.circle,
-        border: Border.fromBorderSide(BorderSide(color: Colors.black, width: 1)),
+        border: Border.fromBorderSide(
+          BorderSide(color: Colors.black, width: 1),
+        ),
       ),
-      child: CustomPaint(
-        painter: BoltPainter(),
-      ),
+      child: CustomPaint(painter: BoltPainter()),
     );
   }
 }

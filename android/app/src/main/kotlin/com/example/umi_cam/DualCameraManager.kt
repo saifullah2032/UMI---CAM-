@@ -2,6 +2,7 @@ package com.example.umi_cam
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
@@ -12,6 +13,8 @@ import android.media.ImageReader
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.util.Log
 import android.util.Size
 import android.view.Surface
@@ -19,6 +22,8 @@ import androidx.core.content.ContextCompat
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.view.TextureRegistry
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -70,10 +75,13 @@ class DualCameraManager(
     // Frame Rate Control
     private var lastFrontFrameTime = 0L
     private var lastBackFrameTime = 0L
+    private var frameProcessingEnabled = false
     
     // State Management  
     private var isInitialized = false
     private var isCamerasOpen = false
+    private var frontCameraReady = false
+    private var backCameraReady = false
     
     // Callback for camera opening completion
     private var openCamerasCallback: ((Boolean, String?) -> Unit)? = null
@@ -93,6 +101,27 @@ class DualCameraManager(
         Log.d(TAG, "Using Surface Producer API: ${Build.VERSION.SDK_INT >= 36}")
         
         try {
+            // Check if already initialized to prevent texture recreation
+            if (isInitialized && frontTextureEntry != null && backTextureEntry != null) {
+                val fullyOpen = frontCamera != null && backCamera != null &&
+                    frontCaptureSession != null && backCaptureSession != null
+                if (!fullyOpen) {
+                    isCamerasOpen = false
+                    frontCameraReady = false
+                    backCameraReady = false
+                }
+
+                Log.d(TAG, "DualCameraManager already initialized, reusing existing textures (fullyOpen=$fullyOpen)")
+                val resultData = mapOf(
+                    "frontTextureId" to (frontTextureEntry?.id() ?: -1),
+                    "backTextureId" to (backTextureEntry?.id() ?: -1),
+                    "width" to PREVIEW_WIDTH,
+                    "height" to PREVIEW_HEIGHT
+                )
+                callback(true, null, resultData)
+                return
+            }
+            
             // Check camera permissions
             if (!hasRequiredPermissions()) {
                 callback(false, "Camera permissions not granted", null)
@@ -101,9 +130,13 @@ class DualCameraManager(
             
             startBackgroundThread()
             
-            // Create Flutter texture entries with Android 15+ compatibility
-            frontTextureEntry = createCompatibleTextureEntry("front")
-            backTextureEntry = createCompatibleTextureEntry("back")
+            // Only create new texture entries if we don't have valid ones
+            if (frontTextureEntry == null) {
+                frontTextureEntry = createCompatibleTextureEntry("front")
+            }
+            if (backTextureEntry == null) {
+                backTextureEntry = createCompatibleTextureEntry("back")
+            }
             
             frontSurfaceTexture = frontTextureEntry?.surfaceTexture()
             backSurfaceTexture = backTextureEntry?.surfaceTexture()
@@ -152,19 +185,10 @@ class DualCameraManager(
             val textureEntry = textureRegistry.createSurfaceTexture()
             Log.d(TAG, "$cameraName texture entry created with ID: ${textureEntry.id()}")
             
-            // For Android 15+ (API 36), ensure Surface Producer compatibility
+            // Flutter engine owns texture updates; avoid manual updateTexImage calls from plugin thread.
+            // Manual updates can fail with invalid EGLDisplay and break preview rendering.
             if (Build.VERSION.SDK_INT >= 36) {
-                Log.d(TAG, "$cameraName: Using Android 15+ Surface Producer API compatibility mode")
-                // The TextureRegistry handles Surface Producer migration internally in newer Flutter versions
-                // We just need to ensure proper attachment to GL context
-                textureEntry.surfaceTexture()?.setOnFrameAvailableListener({ surfaceTexture ->
-                    // Ensure the surface texture is properly attached to GL context
-                    try {
-                        surfaceTexture.updateTexImage()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "$cameraName: Surface texture update failed - this is expected during initialization", e)
-                    }
-                })
+                Log.d(TAG, "$cameraName: Android 15+ texture mode active (engine-managed updates)")
             }
             
             textureEntry
@@ -183,6 +207,8 @@ class DualCameraManager(
     fun openCameras(bypassMode: Boolean = false, callback: (Boolean, String?) -> Unit) {
         Log.d(TAG, "Opening cameras (bypassMode: $bypassMode)...")
         Log.d(TAG, "System info - SDK: ${Build.VERSION.SDK_INT}, Release: ${Build.VERSION.RELEASE}")
+        Log.d(TAG, "Current state - isInitialized: $isInitialized, isCamerasOpen: $isCamerasOpen")
+        Log.d(TAG, "Camera devices - front: ${frontCamera != null}, back: ${backCamera != null}")
         
         if (!isInitialized) {
             callback(false, "DualCameraManager not initialized")
@@ -190,8 +216,22 @@ class DualCameraManager(
         }
         
         if (isCamerasOpen) {
-            callback(false, "Cameras already open")
-            return
+            val fullyOpen = frontCamera != null && backCamera != null &&
+                frontCaptureSession != null && backCaptureSession != null
+            if (fullyOpen) {
+                Log.d(TAG, "✅ Cameras already open and ready")
+                callback(true, null)
+                return
+            }
+
+            Log.w(TAG, "⚠️ Stale open state detected; resetting camera state before reopen")
+            isCamerasOpen = false
+            frontCameraReady = false
+            backCameraReady = false
+            frontCaptureSession = null
+            backCaptureSession = null
+            frontCamera = null
+            backCamera = null
         }
         
         try {
@@ -225,10 +265,16 @@ class DualCameraManager(
             validateCameraFormats(frontCameraId, "FRONT")
             validateCameraFormats(backCameraId, "BACK")
             
-            Log.d(TAG, "🚀 Opening front camera...")
-            cameraManager.openCamera(frontCameraId, frontCameraStateCallback, backgroundHandler)
+            Log.d(TAG, "🚀 Starting simultaneous camera initialization...")
             
-            Log.d(TAG, "🚀 Opening back camera...")
+            // Reset camera ready states
+            frontCameraReady = false
+            backCameraReady = false
+            frameProcessingEnabled = false
+            
+            // Open both cameras concurrently
+            Log.d(TAG, "Opening front and back cameras together...")
+            cameraManager.openCamera(frontCameraId, frontCameraStateCallback, backgroundHandler)
             cameraManager.openCamera(backCameraId, backCameraStateCallback, backgroundHandler)
             
         } catch (e: Exception) {
@@ -286,7 +332,20 @@ class DualCameraManager(
         Log.d(TAG, "Closing cameras...")
         
         try {
-            // Close capture sessions
+            // Close capture sessions first (required before closing devices)
+            try {
+                frontCaptureSession?.stopRepeating()
+            } catch (_: Exception) {}
+            try {
+                backCaptureSession?.stopRepeating()
+            } catch (_: Exception) {}
+            try {
+                frontCaptureSession?.abortCaptures()
+            } catch (_: Exception) {}
+            try {
+                backCaptureSession?.abortCaptures()
+            } catch (_: Exception) {}
+
             frontCaptureSession?.close()
             backCaptureSession?.close()
             frontCaptureSession = null
@@ -303,8 +362,15 @@ class DualCameraManager(
             backImageReader?.close()
             frontPhotoReader?.close()
             backPhotoReader?.close()
+            frontImageReader = null
+            backImageReader = null
+            frontPhotoReader = null
+            backPhotoReader = null
             
             isCamerasOpen = false
+            frontCameraReady = false
+            backCameraReady = false
+            frameProcessingEnabled = false
             
             Log.d(TAG, "Cameras closed successfully")
             callback(true, null)
@@ -321,18 +387,70 @@ class DualCameraManager(
     fun dispose() {
         Log.d(TAG, "Disposing DualCameraManager...")
         
+        // First close cameras and sessions properly
         closeCameras { _, _ -> }
         
-        // Release texture entries
-        frontTextureEntry?.release()
-        backTextureEntry?.release()
+        // Wait a bit for sessions to fully close
+        try {
+            Thread.sleep(100)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+        
+        // Clean up surface textures first to prevent BufferQueue abandonment
+        frontSurfaceTexture?.let { surfaceTexture ->
+            try {
+                surfaceTexture.setOnFrameAvailableListener(null)
+                Log.d(TAG, "Front surface texture listener cleared")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error clearing front surface texture listener", e)
+            }
+        }
+        
+        backSurfaceTexture?.let { surfaceTexture ->
+            try {
+                surfaceTexture.setOnFrameAvailableListener(null)
+                Log.d(TAG, "Back surface texture listener cleared")
+            } catch (e: Exception) {
+                Log.w(TAG, "Error clearing back surface texture listener", e)
+            }
+        }
+        
+        frontSurfaceTexture = null
+        backSurfaceTexture = null
+        
+        // Release texture entries safely
+        try {
+            frontTextureEntry?.release()
+            Log.d(TAG, "Front texture entry released successfully")
+        } catch (e: RuntimeException) {
+            if (e.message?.contains("FlutterJNI is not attached to native") == true) {
+                Log.w(TAG, "FlutterJNI already detached, skipping front texture cleanup: ${e.message}")
+            } else {
+                Log.e(TAG, "Error releasing front texture entry", e)
+            }
+        }
+        
+        try {
+            backTextureEntry?.release()
+            Log.d(TAG, "Back texture entry released successfully")
+        } catch (e: RuntimeException) {
+            if (e.message?.contains("FlutterJNI is not attached to native") == true) {
+                Log.w(TAG, "FlutterJNI already detached, skipping back texture cleanup: ${e.message}")
+            } else {
+                Log.e(TAG, "Error releasing back texture entry", e)
+            }
+        }
+        
         frontTextureEntry = null
         backTextureEntry = null
         
         stopBackgroundThread()
         
         isInitialized = false
-        Log.d(TAG, "DualCameraManager disposed")
+        frontCameraReady = false
+        backCameraReady = false
+        Log.d(TAG, "DualCameraManager disposed safely with proper texture cleanup")
     }
 
     // ============================================================
@@ -409,6 +527,9 @@ class DualCameraManager(
             Log.w(TAG, "Front camera device ID: ${camera.id}")
             camera.close()
             frontCamera = null
+            frontCaptureSession = null
+            frontCameraReady = false
+            isCamerasOpen = false
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
@@ -424,10 +545,15 @@ class DualCameraManager(
             }
             camera.close()
             frontCamera = null
+            frontCaptureSession = null
+            frontCameraReady = false
+            isCamerasOpen = false
             
             // Call error callback
-            openCamerasCallback?.invoke(false, "Front camera error: $error")
-            openCamerasCallback = null
+            openCamerasCallback?.let {
+                it(false, "Front camera error: $error")
+                openCamerasCallback = null
+            }
         }
     }
 
@@ -453,6 +579,9 @@ class DualCameraManager(
             Log.w(TAG, "Back camera device ID: ${camera.id}")
             camera.close()
             backCamera = null
+            backCaptureSession = null
+            backCameraReady = false
+            isCamerasOpen = false
         }
 
         override fun onError(camera: CameraDevice, error: Int) {
@@ -468,10 +597,15 @@ class DualCameraManager(
             }
             camera.close()
             backCamera = null
+            backCaptureSession = null
+            backCameraReady = false
+            isCamerasOpen = false
             
             // Call error callback
-            openCamerasCallback?.invoke(false, "Back camera error: $error")
-            openCamerasCallback = null
+            openCamerasCallback?.let {
+                it(false, "Back camera error: $error")
+                openCamerasCallback = null
+            }
         }
     }
 
@@ -509,6 +643,12 @@ class DualCameraManager(
             
             // Set up frame capture callback
             frontImageReader!!.setOnImageAvailableListener({ reader ->
+                if (!frameProcessingEnabled) {
+                    val image = reader.acquireLatestImage()
+                    image?.close()
+                    return@setOnImageAvailableListener
+                }
+
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastFrontFrameTime < FRAME_INTERVAL_MS) {
                     return@setOnImageAvailableListener
@@ -518,7 +658,7 @@ class DualCameraManager(
                 val image = reader.acquireLatestImage()
                 image?.use {
                     try {
-                        val bitmap = yuvToBitmap(it)
+                        val bitmap = yuvToBitmap(it, true)
                         frontFrameRef.set(bitmap)
                     } catch (e: Exception) {
                         Log.e(TAG, "Error processing front frame", e)
@@ -570,6 +710,12 @@ class DualCameraManager(
             
             // Set up frame capture callback
             backImageReader!!.setOnImageAvailableListener({ reader ->
+                if (!frameProcessingEnabled) {
+                    val image = reader.acquireLatestImage()
+                    image?.close()
+                    return@setOnImageAvailableListener
+                }
+
                 val currentTime = System.currentTimeMillis()
                 if (currentTime - lastBackFrameTime < FRAME_INTERVAL_MS) {
                     return@setOnImageAvailableListener
@@ -579,7 +725,7 @@ class DualCameraManager(
                 val image = reader.acquireLatestImage()
                 image?.use {
                     try {
-                        val bitmap = yuvToBitmap(it)
+                        val bitmap = yuvToBitmap(it, false)
                         backFrameRef.set(bitmap)
                     } catch (e: Exception) {
                         Log.e(TAG, "Error processing back frame", e)
@@ -610,6 +756,7 @@ class DualCameraManager(
             Log.d(TAG, "✅ FRONT CAPTURE SESSION CONFIGURED")
             Log.d(TAG, "Front session surfaces: ${session.inputSurface}")
             frontCaptureSession = session
+            frontCameraReady = true
             startFrontPreview()
             checkBothCamerasReady()
         }
@@ -617,6 +764,9 @@ class DualCameraManager(
         override fun onConfigureFailed(session: CameraCaptureSession) {
             Log.e(TAG, "❌ FRONT CAPTURE SESSION CONFIGURATION FAILED")
             Log.e(TAG, "This usually indicates incompatible surface formats or sizes")
+            frontCaptureSession = null
+            frontCameraReady = false
+            isCamerasOpen = false
             
             // Call error callback
             openCamerasCallback?.invoke(false, "Front capture session configuration failed")
@@ -637,6 +787,7 @@ class DualCameraManager(
             Log.d(TAG, "✅ BACK CAPTURE SESSION CONFIGURED")
             Log.d(TAG, "Back session surfaces: ${session.inputSurface}")
             backCaptureSession = session
+            backCameraReady = true
             startBackPreview()
             checkBothCamerasReady()
         }
@@ -644,6 +795,9 @@ class DualCameraManager(
         override fun onConfigureFailed(session: CameraCaptureSession) {
             Log.e(TAG, "❌ BACK CAPTURE SESSION CONFIGURATION FAILED")
             Log.e(TAG, "This usually indicates incompatible surface formats or sizes")
+            backCaptureSession = null
+            backCameraReady = false
+            isCamerasOpen = false
             
             // Call error callback
             openCamerasCallback?.invoke(false, "Back capture session configuration failed")
@@ -660,13 +814,15 @@ class DualCameraManager(
     }
 
     private fun checkBothCamerasReady() {
-        if (frontCaptureSession != null && backCaptureSession != null && !isCamerasOpen) {
+        if (frontCameraReady && backCameraReady && 
+            frontCaptureSession != null && backCaptureSession != null && !isCamerasOpen) {
             isCamerasOpen = true
             Log.d(TAG, "🎉 BOTH CAMERAS ARE READY AND STREAMING")
             Log.d(TAG, "Front camera status: ${frontCamera != null}")
             Log.d(TAG, "Back camera status: ${backCamera != null}")
             Log.d(TAG, "Front session status: ${frontCaptureSession != null}")
             Log.d(TAG, "Back session status: ${backCaptureSession != null}")
+            Log.d(TAG, "Front ready: $frontCameraReady, Back ready: $backCameraReady")
             
             // Call the callback to notify that cameras are successfully opened
             openCamerasCallback?.invoke(true, null)
@@ -689,7 +845,7 @@ class DualCameraManager(
             requestBuilder.addTarget(frontImageReader!!.surface)
             
             // Set continuous auto-focus
-            requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             
             session.setRepeatingRequest(requestBuilder.build(), null, backgroundHandler)
@@ -710,7 +866,7 @@ class DualCameraManager(
             requestBuilder.addTarget(backImageReader!!.surface)
             
             // Set continuous auto-focus
-            requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
+            requestBuilder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             requestBuilder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
             
             session.setRepeatingRequest(requestBuilder.build(), null, backgroundHandler)
@@ -728,7 +884,7 @@ class DualCameraManager(
      * Convert YUV_420_888 Image to ARGB Bitmap
      * Optimized for real-time processing
      */
-    private fun yuvToBitmap(image: Image): Bitmap {
+    private fun yuvToBitmap(image: Image, isFront: Boolean): Bitmap {
         val yBuffer = image.planes[0].buffer
         val uBuffer = image.planes[1].buffer
         val vBuffer = image.planes[2].buffer
@@ -759,11 +915,21 @@ class DualCameraManager(
             out
         )
 
-        return BitmapFactory.decodeByteArray(
+        val decoded = BitmapFactory.decodeByteArray(
             out.toByteArray(),
             0,
             out.size()
         )
+
+        val matrix = Matrix()
+        if (isFront) {
+            matrix.postRotate(270f)
+            matrix.postScale(-1f, 1f)
+        } else {
+            matrix.postRotate(90f)
+        }
+
+        return Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
     }
 
     /**
@@ -780,19 +946,251 @@ class DualCameraManager(
         return backFrameRef.get()
     }
 
+    fun setFrameProcessingEnabled(enabled: Boolean) {
+        frameProcessingEnabled = enabled
+        Log.d(TAG, "Frame processing ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    fun getTextureIds(): Map<String, Any> {
+        return mapOf(
+            "frontTextureId" to (frontTextureEntry?.id() ?: -1L),
+            "backTextureId" to (backTextureEntry?.id() ?: -1L)
+        )
+    }
+
+    fun getCameraInfo(): Map<String, Any> {
+        val frontId = getFrontCameraId()
+        val backId = getBackCameraId()
+        val concurrentSupported = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            cameraManager.concurrentCameraIds.any { ids ->
+                frontId != null && backId != null && ids.contains(frontId) && ids.contains(backId)
+            }
+        } else {
+            false
+        }
+
+        val actualOpen = isCamerasOpen && frontCamera != null && backCamera != null &&
+            frontCaptureSession != null && backCaptureSession != null
+
+        return mapOf(
+            "frontCameraId" to (frontId ?: ""),
+            "backCameraId" to (backId ?: ""),
+            "hasFrontCamera" to (frontId != null),
+            "hasBackCamera" to (backId != null),
+            "officialDualCameraSupport" to concurrentSupported,
+            "isDualCameraSupported" to (frontId != null && backId != null),
+            "isInitialized" to isInitialized,
+            "isCamerasOpen" to actualOpen,
+            "frontCameraConnected" to (frontCamera != null),
+            "backCameraConnected" to (backCamera != null)
+        )
+    }
+
     /**
-     * Get camera status for debugging
+     * Get camera status for debugging and readiness checks
      */
     fun getCameraStatus(): Map<String, Any> {
+        val frontReady = isInitialized && frontCamera != null && frontCaptureSession != null && 
+                        frontTextureEntry != null && frontSurfaceTexture != null
+        val backReady = isInitialized && backCamera != null && backCaptureSession != null && 
+                       backTextureEntry != null && backSurfaceTexture != null
+        val actualOpen = isCamerasOpen && frontCamera != null && backCamera != null &&
+            frontCaptureSession != null && backCaptureSession != null
+        val systemReady = frontReady && backReady && actualOpen
+        
         return mapOf(
             "isInitialized" to isInitialized,
-            "isCamerasOpen" to isCamerasOpen,
+            "isCamerasOpen" to actualOpen,
             "frontCameraConnected" to (frontCamera != null),
             "backCameraConnected" to (backCamera != null),
             "frontSessionActive" to (frontCaptureSession != null),
             "backSessionActive" to (backCaptureSession != null),
             "frontTextureId" to (frontTextureEntry?.id() ?: -1),
-            "backTextureId" to (backTextureEntry?.id() ?: -1)
+            "backTextureId" to (backTextureEntry?.id() ?: -1),
+            "frontTextureReady" to (frontTextureEntry != null && frontSurfaceTexture != null),
+            "backTextureReady" to (backTextureEntry != null && backSurfaceTexture != null),
+            "frontReady" to frontReady,
+            "backReady" to backReady,
+            "systemReady" to systemReady
         )
     }
-}
+    
+     /**
+      * Check if the camera system is completely ready for use
+      */
+     fun isSystemReady(): Boolean {
+         return isInitialized && 
+                isCamerasOpen && 
+                frontCamera != null && 
+                backCamera != null && 
+                frontCaptureSession != null && 
+                backCaptureSession != null && 
+                frontTextureEntry != null && 
+                backTextureEntry != null && 
+                frontSurfaceTexture != null && 
+                backSurfaceTexture != null
+     }
+
+     /**
+      * Capture a high-quality dual photo from both cameras
+      * Applies composition logic similar to VideoComposer
+      */
+     fun takePicture(callback: (Boolean, String?, String?) -> Unit) {
+         if (!isSystemReady()) {
+             callback(false, "Camera system not ready", null)
+             return
+         }
+
+         backgroundHandler?.post {
+             try {
+                 Log.d(TAG, "Capturing dual photo...")
+
+                 // Get latest frames from both cameras
+                 val frontFrame = getCurrentFrontFrame()
+                 val backFrame = getCurrentBackFrame()
+
+                 if (backFrame == null) {
+                     callback(false, "Back camera frame not available", null)
+                     return@post
+                 }
+
+                 Log.d(TAG, "Front frame available: ${frontFrame != null}")
+                 Log.d(TAG, "Back frame available: ${backFrame != null}")
+
+                 // Create photo composition (1920x1080 ARGB_8888)
+                 val photoBitmap = Bitmap.createBitmap(1920, 1080, Bitmap.Config.ARGB_8888)
+                 val photoCanvas = Canvas(photoBitmap)
+                 val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                     isFilterBitmap = true
+                 }
+
+                 // Draw back camera as main/full-screen
+                 val mainRect = android.graphics.Rect(0, 0, 1920, 1080)
+                 photoCanvas.drawBitmap(backFrame, null, mainRect, paint)
+
+                 // Draw front camera as picture-in-picture (bottom-right corner)
+                 frontFrame?.let { front ->
+                     val pipSize = 480  // 25% of 1920
+                     val pipMargin = 20
+                     val pipX = 1920 - pipSize - pipMargin
+                     val pipY = 1080 - pipSize - pipMargin
+                     val pipRect = android.graphics.Rect(pipX, pipY, pipX + pipSize, pipY + pipSize)
+                     photoCanvas.drawBitmap(front, null, pipRect, paint)
+                 }
+
+                  // Save photo to file
+                  val photoFile = createPhotoFile()
+                  savePhoto(photoBitmap, photoFile)
+
+                  Log.d(TAG, "Photo saved: ${photoFile.absolutePath}")
+                  Log.d(TAG, "Photo file exists: ${photoFile.exists()}")
+                  Log.d(TAG, "Photo file size: ${photoFile.length()} bytes")
+
+                  // Save to MediaStore DCIM/UMI-CAM for Gallery visibility
+                  savePhotoToGallery(photoFile)
+
+                  // Trigger media scanner to make it visible in Photos app
+                  triggerMediaScan(photoFile)
+
+                  // Recycle bitmap to free memory
+                  photoBitmap.recycle()
+
+                  callback(true, null, photoFile.absolutePath)
+
+             } catch (e: Exception) {
+                 Log.e(TAG, "Failed to capture photo", e)
+                 callback(false, "Photo capture failed: ${e.message}", null)
+             }
+         }
+     }
+
+      private fun createPhotoFile(): File {
+          // CRITICAL FIX: Save to Movies/UMI-CAM directory (not Downloads)
+          val mediaDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+              // Android 10+ (API 29+): Use app-specific directory in Movies with scoped storage
+              File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "UMI-CAM")
+          } else {
+              // Pre-Android 10 (API < 29): Use public Movies directory
+              File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "UMI-CAM")
+          }
+          
+          if (!mediaDir.exists()) {
+              mediaDir.mkdirs()
+          }
+          
+          val timestamp = System.currentTimeMillis()
+          val fileName = "umi_cam_photo_$timestamp.jpg"
+          return File(mediaDir, fileName)
+      }
+
+      private fun savePhoto(bitmap: Bitmap, file: File) {
+          java.io.FileOutputStream(file).use { out ->
+              bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+              Log.d(TAG, "Photo compressed and saved with quality 95")
+          }
+      }
+
+      /**
+       * Save the captured photo to MediaStore DCIM/UMI-CAM directory
+       * This makes the photo immediately visible in the device's Gallery/Photos app
+       */
+      private fun savePhotoToGallery(sourceFile: File) {
+          if (!sourceFile.exists()) {
+              Log.e(TAG, "Source photo file does not exist: ${sourceFile.absolutePath}")
+              return
+          }
+          
+          try {
+              val timestamp = System.currentTimeMillis()
+              val displayName = "IMG_${timestamp}_dual.jpg"
+              
+              // Create MediaStore entry for DCIM/UMI-CAM
+              val values = ContentValues().apply {
+                  put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
+                  put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                  put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/UMI-CAM")
+                  put(MediaStore.Images.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                  put(MediaStore.Images.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+              }
+              
+              // Insert into MediaStore and get Uri
+              val uri = context.contentResolver.insert(
+                  MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                  values
+              )
+              
+              if (uri == null) {
+                  Log.e(TAG, "Failed to create MediaStore entry for photo")
+                  return
+              }
+              
+              // Copy photo data to MediaStore location via Uri
+              context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                  sourceFile.inputStream().use { inputStream ->
+                      inputStream.copyTo(outputStream)
+                  }
+              }
+              
+              Log.d(TAG, "Photo saved to MediaStore: $displayName")
+              Log.d(TAG, "Uri: $uri")
+              Log.d(TAG, "File will appear in DCIM/UMI-CAM")
+              
+          } catch (e: Exception) {
+              Log.e(TAG, "Error saving photo to MediaStore", e)
+          }
+      }
+
+      private fun triggerMediaScan(file: File) {
+         try {
+             android.media.MediaScannerConnection.scanFile(
+                 context,
+                 arrayOf(file.absolutePath),
+                 arrayOf("image/jpeg"),
+                 null
+             )
+             Log.d(TAG, "Media scanner triggered for photo: ${file.absolutePath}")
+         } catch (e: Exception) {
+             Log.e(TAG, "Error triggering media scanner for photo", e)
+         }
+     }
+ }

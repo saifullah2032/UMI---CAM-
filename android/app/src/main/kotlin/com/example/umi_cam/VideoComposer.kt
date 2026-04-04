@@ -1,19 +1,25 @@
 package com.example.umi_cam
 
 import android.Manifest
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.media.*
 import android.media.MediaCodec.BufferInfo
+import android.media.MediaScannerConnection
+import android.os.Build
+import android.os.Environment
 import android.os.Handler
 import android.os.HandlerThread
+import android.provider.MediaStore
 import android.util.Log
 import android.view.Surface
 import androidx.core.content.ContextCompat
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
+import java.nio.BufferOverflowException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.min
@@ -41,11 +47,11 @@ class VideoComposer(
         private const val VIDEO_HEIGHT = 1080
         private const val VIDEO_BIT_RATE = 8_000_000  // 8 Mbps for high quality
         private const val VIDEO_FRAME_RATE = 30
-        private const val VIDEO_I_FRAME_INTERVAL = 2  // GOP size
+        private const val VIDEO_I_FRAME_INTERVAL = 1  // 1-second GOP (keyframe every second)
         
         // Audio encoding configuration
         private const val AUDIO_SAMPLE_RATE = 44100
-        private const val AUDIO_CHANNEL_COUNT = 2  // Stereo
+        private const val AUDIO_CHANNEL_COUNT = 1
         private const val AUDIO_BIT_RATE = 128_000  // 128 kbps
         private const val AUDIO_BUFFER_SIZE = 4096
         
@@ -72,6 +78,11 @@ class VideoComposer(
     private var videoTrackIndex = -1
     private var audioTrackIndex = -1
     private var muxerStarted = false
+    private var tracksAdded = 0
+    private var expectedTracks = 1
+
+    private val videoBufferInfo = BufferInfo()
+    private val audioBufferInfo = BufferInfo()
     
     // Canvas composition
     private var compositionCanvas: Canvas? = null
@@ -89,6 +100,8 @@ class VideoComposer(
     private val isInitialized = AtomicBoolean(false)
     private var outputFile: File? = null
     private var recordingStartTime = 0L
+    private var startTimeNs = 0L
+    private var audioStartTimeNs = 0L
     
     // Layout state
     private var currentLayout: RecordingLayout = RecordingLayout.PICTURE_IN_PICTURE
@@ -105,6 +118,10 @@ class VideoComposer(
     
     // Smart Selfie configuration
     private var isSmartSelfieEnabled: Boolean = false
+    private var enableAudio: Boolean = true
+    
+    // Smart Crop for 16:9 cinematic frame
+    private var enableSmartCrop: Boolean = false
     
     // Frame synchronization
     private val frontFrameRef = AtomicReference<Bitmap?>(null)
@@ -197,8 +214,10 @@ class VideoComposer(
             // Initialize video encoder with dynamic quality settings
             setupVideoEncoder(width, height, bitrate)
             
-            // Initialize audio encoder
-            setupAudioEncoder()
+            // Initialize audio encoder (optional)
+            if (enableAudio) {
+                setupAudioEncoder()
+            }
             
             // Initialize muxer
             setupMediaMuxer()
@@ -206,12 +225,16 @@ class VideoComposer(
             // Start recording
             isRecording.set(true)
             recordingStartTime = System.currentTimeMillis()
+            startTimeNs = System.nanoTime()
+            audioStartTimeNs = startTimeNs
             
             // Start composition loop
             startCompositionLoop()
             
-            // Start audio recording
-            startAudioRecording()
+            // Start audio recording if enabled
+            if (enableAudio) {
+                startAudioRecording()
+            }
             
             Log.d(TAG, "Recording started successfully")
             Log.d(TAG, "Output file: ${outputFile?.absolutePath}")
@@ -246,10 +269,18 @@ class VideoComposer(
                 0L
             }
             
+            // Ensure file path is always returned, even if null
+            if (filePath == null) {
+                Log.w(TAG, "Warning: outputFile is null, returning empty path")
+            }
+            
             Log.d(TAG, "Recording stopped successfully")
             Log.d(TAG, "Duration: ${duration}ms")
-            Log.d(TAG, "Output: $filePath")
+            Log.d(TAG, "Output file path: $filePath")
+            Log.d(TAG, "Output file exists: ${outputFile?.exists()}")
             
+            // CRITICAL: Pass filePath as third parameter (not second)
+            // error parameter should be null on success
             callback(true, null, filePath)
             
         } catch (e: Exception) {
@@ -305,6 +336,19 @@ class VideoComposer(
     }
     
     /**
+     * Enable/disable 16:9 Smart Crop for cinematic effect
+     */
+    fun setSmartCropEnabled(enabled: Boolean) {
+        enableSmartCrop = enabled
+        Log.d(TAG, "Smart Crop (16:9 Cinematic) ${if (enabled) "enabled" else "disabled"}")
+    }
+
+    fun setAudioEnabled(enabled: Boolean) {
+        enableAudio = enabled
+        Log.d(TAG, "Audio recording ${if (enabled) "enabled" else "disabled"}")
+    }
+    
+    /**
      * Swap front and back camera roles during recording
      */
     fun swapCameras(swapped: Boolean) {
@@ -316,11 +360,11 @@ class VideoComposer(
      * Update PiP window coordinates for dynamic positioning
      */
     fun updatePiPCoordinates(x: Float, y: Float, width: Float, height: Float) {
-        // Convert from Flutter screen coordinates to video coordinates
-        pipX = (x / 1920f) * VIDEO_WIDTH  // Assuming Flutter uses 1920x1080 reference
-        pipY = (y / 1080f) * VIDEO_HEIGHT
-        pipWidth = (width / 1920f) * VIDEO_WIDTH
-        pipHeight = (height / 1080f) * VIDEO_HEIGHT
+        // Inputs are normalized [0..1] coordinates from Flutter
+        pipX = x.coerceIn(0f, 1f) * VIDEO_WIDTH
+        pipY = y.coerceIn(0f, 1f) * VIDEO_HEIGHT
+        pipWidth = width.coerceIn(0f, 1f) * VIDEO_WIDTH
+        pipHeight = height.coerceIn(0f, 1f) * VIDEO_HEIGHT
         pipCoordinatesSet = true
         
         Log.d(TAG, "PiP coordinates updated: ($pipX, $pipY, $pipWidth, $pipHeight)")
@@ -373,7 +417,8 @@ class VideoComposer(
             "videoSize" to "${VIDEO_WIDTH}x$VIDEO_HEIGHT",
             "frameRate" to VIDEO_FRAME_RATE,
             "videoBitRate" to VIDEO_BIT_RATE,
-            "audioBitRate" to AUDIO_BIT_RATE
+            "audioBitRate" to AUDIO_BIT_RATE,
+            "enableAudio" to enableAudio
         )
     }
 
@@ -411,27 +456,37 @@ class VideoComposer(
         audioHandler = Handler(audioThread!!.looper)
     }
 
+    private fun mediaRootDir(): File {
+        // CRITICAL FIX: Save to Movies/UMI-CAM directory (not Downloads)
+        val mediaDir = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // Android 10+ (API 29+): Use app-specific directory in Movies with scoped storage
+            File(context.getExternalFilesDir(Environment.DIRECTORY_MOVIES), "UMI-CAM")
+        } else {
+            // Pre-Android 10 (API < 29): Use public Movies directory
+            File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES), "UMI-CAM")
+        }
+        
+        // Ensure directory exists
+        if (!mediaDir.exists()) {
+            mediaDir.mkdirs()
+        }
+        
+        Log.d(TAG, "Media root directory: ${mediaDir.absolutePath}")
+        Log.d(TAG, "Using Android API level ${Build.VERSION.SDK_INT} storage method")
+        return mediaDir
+    }
+
     private fun createOutputFile(): File {
         val timestamp = System.currentTimeMillis()
         val fileName = "umi_cam_recording_$timestamp.mp4"
-        val outputDir = File(context.cacheDir, "recordings")
-        
-        if (!outputDir.exists()) {
-            outputDir.mkdirs()
-        }
-        
+        val outputDir = mediaRootDir()
         return File(outputDir, fileName)
     }
 
     private fun createPhotoFile(): File {
         val timestamp = System.currentTimeMillis()
         val fileName = "umi_cam_photo_$timestamp.jpg"
-        val outputDir = File(context.cacheDir, "photos")
-        
-        if (!outputDir.exists()) {
-            outputDir.mkdirs()
-        }
-        
+        val outputDir = mediaRootDir()
         return File(outputDir, fileName)
     }
 
@@ -452,43 +507,49 @@ class VideoComposer(
     }
 
     private fun setupAudioEncoder() {
+        val minBufferSize = AudioRecord.getMinBufferSize(
+            AUDIO_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT
+        )
+        
+        if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
+            Log.e(TAG, "Invalid audio buffer size calculation")
+            throw IllegalStateException("Cannot determine minimum buffer size for audio")
+        }
+        
+        audioRecord = AudioRecord(
+            MediaRecorder.AudioSource.MIC,
+            AUDIO_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+            minBufferSize * 4  // CRITICAL: 4x multiplier prevents BufferOverflowException
+        )
+        
         audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, AUDIO_SAMPLE_RATE, AUDIO_CHANNEL_COUNT).apply {
             setInteger(MediaFormat.KEY_BIT_RATE, AUDIO_BIT_RATE)
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
+            setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, minBufferSize * 2)  // CRITICAL: 2x multiplier for codec input size
         }
         
         audioEncoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_AAC)
         audioEncoder!!.configure(audioFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
         audioEncoder!!.start()
         
-        // Initialize AudioRecord
-        val minBufferSize = AudioRecord.getMinBufferSize(
-            AUDIO_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT
-        )
-        
-        audioRecord = AudioRecord(
-            MediaRecorder.AudioSource.MIC,
-            AUDIO_SAMPLE_RATE,
-            AudioFormat.CHANNEL_IN_STEREO,
-            AudioFormat.ENCODING_PCM_16BIT,
-            maxOf(minBufferSize, AUDIO_BUFFER_SIZE)
-        )
-        
-        Log.d(TAG, "Audio encoder configured: ${AUDIO_SAMPLE_RATE}Hz stereo @ ${AUDIO_BIT_RATE}bps")
+        Log.d(TAG, "Audio encoder configured: ${AUDIO_SAMPLE_RATE}Hz mono @ ${AUDIO_BIT_RATE}bps")
+        Log.d(TAG, "AudioRecord buffer size: ${minBufferSize * 4} bytes (minBufferSize: $minBufferSize, multiplier: 4x for overflow prevention)")
+        Log.d(TAG, "KEY_MAX_INPUT_SIZE: ${minBufferSize * 2} bytes (2x safety margin)")
     }
+
+    // MediaStore publishing intentionally disabled while using unified app-local storage flow.
 
     private fun setupMediaMuxer() {
         mediaMuxer = MediaMuxer(outputFile!!.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-        
-        videoTrackIndex = mediaMuxer!!.addTrack(videoFormat!!)
-        audioTrackIndex = mediaMuxer!!.addTrack(audioFormat!!)
-        
-        mediaMuxer!!.start()
-        muxerStarted = true
-        
-        Log.d(TAG, "MediaMuxer started with video track $videoTrackIndex and audio track $audioTrackIndex")
+
+        tracksAdded = 0
+        expectedTracks = if (enableAudio && audioEncoder != null) 2 else 1
+
+        Log.d(TAG, "MediaMuxer created, waiting for encoder output formats (expectedTracks=$expectedTracks)")
     }
 
     private fun startCompositionLoop() {
@@ -523,6 +584,16 @@ class VideoComposer(
         
         lastCompositionTime = currentTime
         
+        val latestFront = dualCameraManager.getCurrentFrontFrame()
+        if (latestFront != null) {
+            updateFrontFrame(latestFront.copy(latestFront.config ?: Bitmap.Config.ARGB_8888, false))
+        }
+
+        val latestBack = dualCameraManager.getCurrentBackFrame()
+        if (latestBack != null) {
+            updateBackFrame(latestBack.copy(latestBack.config ?: Bitmap.Config.ARGB_8888, false))
+        }
+
         val frontFrame = frontFrameRef.get()
         val backFrame = backFrameRef.get()
         
@@ -547,8 +618,14 @@ class VideoComposer(
             }
         }
         
-        // Draw to encoder surface
+        // Draw cinematic frame overlay if smart crop is enabled
+        if (enableSmartCrop && currentLayout == RecordingLayout.FRONT_ONLY) {
+            drawCinematicFrameOverlay()
+        }
+        
+        // Draw to encoder surface and drain encoded output
         drawToEncoderSurface()
+        drainVideoEncoder(false)
     }
 
     private fun drawPictureInPicture(frontFrame: Bitmap?, backFrame: Bitmap?) {
@@ -559,7 +636,9 @@ class VideoComposer(
         // Draw primary camera as main (full screen)
         primaryFrame?.let { frame ->
             val destRect = Rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT)
-            compositionCanvas?.drawBitmap(frame, null, destRect, paint)
+            val isFrontMain = camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontMain)
+            compositionCanvas?.drawBitmap(frame, sourceRect, destRect, paint)
         }
         
         // Draw secondary camera as PiP (overlay)
@@ -583,11 +662,8 @@ class VideoComposer(
             }
             
             // Apply Smart Selfie 16:9 crop if enabled (only for front camera)
-            val sourceRect = if (isSmartSelfieEnabled && !camerasSwapped) {
-                calculateSmartSelfieCrop(frame)
-            } else {
-                null // Use entire frame
-            }
+            val isFrontPip = !camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontPip)
             
             // Draw border
             val borderPaint = Paint().apply {
@@ -615,19 +691,15 @@ class VideoComposer(
         
         // Draw left camera
         leftFrame?.let { frame ->
-            val sourceRect = if (isSmartSelfieEnabled && (camerasSwapped || frame == frontFrame)) {
-                calculateSmartSelfieCrop(frame)
-            } else null
-            
+            val isFrontLeft = camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontLeft)
             compositionCanvas?.drawBitmap(frame, sourceRect, leftRect, paint)
         }
         
         // Draw right camera  
         rightFrame?.let { frame ->
-            val sourceRect = if (isSmartSelfieEnabled && (!camerasSwapped || frame == frontFrame)) {
-                calculateSmartSelfieCrop(frame)
-            } else null
-            
+            val isFrontRight = !camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontRight)
             compositionCanvas?.drawBitmap(frame, sourceRect, rightRect, paint)
         }
         
@@ -657,19 +729,15 @@ class VideoComposer(
         
         // Draw top camera
         topFrame?.let { frame ->
-            val sourceRect = if (isSmartSelfieEnabled && (camerasSwapped || frame == frontFrame)) {
-                calculateSmartSelfieCrop(frame)
-            } else null
-            
+            val isFrontTop = camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontTop)
             compositionCanvas?.drawBitmap(frame, sourceRect, topRect, paint)
         }
         
         // Draw bottom camera
         bottomFrame?.let { frame ->
-            val sourceRect = if (isSmartSelfieEnabled && (!camerasSwapped || frame == frontFrame)) {
-                calculateSmartSelfieCrop(frame)
-            } else null
-            
+            val isFrontBottom = !camerasSwapped
+            val sourceRect = sourceRectForFrame(frame, isFrontBottom)
             compositionCanvas?.drawBitmap(frame, sourceRect, bottomRect, paint)
         }
         
@@ -687,41 +755,143 @@ class VideoComposer(
     }
     
     /**
+     * Calculate Smart Crop for 16:9 cinematic effect with 1.2x zoom
+     * Crops the top and bottom of the frame to maintain 16:9 aspect ratio
+     * Applies 1.2x zoom to fill the horizontal width
+     */
+    private fun calculateSmartCrop16to9(frame: Bitmap): Rect {
+        val frameWidth = frame.width.toFloat()
+        val frameHeight = frame.height.toFloat()
+        val targetAspectRatio = 16f / 9f  // 1.778
+        val zoomFactor = 1.2f
+        
+        // Calculate the height needed for 16:9 aspect ratio
+        val requiredHeight = frameWidth / targetAspectRatio
+        
+        // Apply zoom - this increases the crop area
+        val zoomedHeight = requiredHeight / zoomFactor
+        val zoomedWidth = frameWidth / zoomFactor
+        
+        // Center crop both horizontally and vertically
+        val cropX = ((frameWidth - zoomedWidth) / 2f).toInt()
+        val cropY = ((frameHeight - zoomedHeight) / 2f).toInt()
+        
+        val cropWidth = zoomedWidth.toInt()
+        val cropHeight = zoomedHeight.toInt()
+        
+        Log.d(TAG, "16:9 Crop: source=${frame.width}x${frame.height}, crop=(${cropX},${cropY},${cropWidth}x${cropHeight}), zoom=$zoomFactor")
+        
+        return Rect(cropX, cropY, cropX + cropWidth, cropY + cropHeight)
+    }
+
+    /**
      * Calculate Smart Selfie 16:9 center crop from 4:3 frame
      * Crops the top and bottom to maintain 16:9 aspect ratio
      */
     private fun calculateSmartSelfieCrop(frame: Bitmap): Rect {
         val frameWidth = frame.width
         val frameHeight = frame.height
-        
-        // Calculate target 16:9 dimensions within 4:3 frame
-        val targetAspectRatio = 16.0f / 9.0f
-        val currentAspectRatio = frameWidth.toFloat() / frameHeight.toFloat()
-        
-        return if (currentAspectRatio > targetAspectRatio) {
-            // Frame is wider than 16:9, crop sides (shouldn't happen with typical cameras)
-            val targetWidth = (frameHeight * targetAspectRatio).toInt()
-            val cropX = (frameWidth - targetWidth) / 2
-            Rect(cropX, 0, cropX + targetWidth, frameHeight)
+        val targetAspectRatio = 16f / 9f
+        val srcAspect = frameWidth.toFloat() / frameHeight.toFloat()
+
+        return if (srcAspect > targetAspectRatio) {
+            val cropH = frameHeight
+            val cropW = (frameHeight * targetAspectRatio).toInt()
+            val cropX = (frameWidth - cropW) / 2
+            Rect(cropX, 0, cropX + cropW, cropH)
         } else {
-            // Frame is taller than 16:9, crop top/bottom (typical case for 4:3 to 16:9)
-            val targetHeight = (frameWidth / targetAspectRatio).toInt()
-            val cropY = (frameHeight - targetHeight) / 2
-            Rect(0, cropY, frameWidth, cropY + targetHeight)
+            val cropW = frameWidth
+            val cropH = (frameWidth / targetAspectRatio).toInt()
+            val cropY = (frameHeight - cropH) / 2
+            Rect(0, cropY, cropW, cropY + cropH)
         }
+    }
+
+    private fun sourceRectForFrame(frame: Bitmap, isFrontFrame: Boolean): Rect? {
+        // Apply smart crop if enabled for front camera
+        if (enableSmartCrop && isFrontFrame) {
+            return calculateSmartCrop16to9(frame)
+        }
+        // Apply smart selfie crop if enabled for front camera
+        if (isSmartSelfieEnabled && isFrontFrame) {
+            return calculateSmartSelfieCrop(frame)
+        }
+        return null
     }
 
     private fun drawSingleCamera(frame: Bitmap?, isFront: Boolean) {
         frame?.let {
             val destRect = Rect(0, 0, VIDEO_WIDTH, VIDEO_HEIGHT)
-            compositionCanvas?.drawBitmap(it, null, destRect, paint)
+            val sourceRect = sourceRectForFrame(it, isFront)
+            compositionCanvas?.drawBitmap(it, sourceRect, destRect, paint)
         }
+    }
+    
+    /**
+     * Draw the cinematic frame overlay to show the user what's being recorded
+     * Shows the 16:9 crop area with Neo-Brutalist styling
+     */
+    private fun drawCinematicFrameOverlay() {
+        // 16:9 aspect ratio in 1920x1080 output
+        val cinWidth = VIDEO_WIDTH
+        val cinHeight = (VIDEO_WIDTH * 9f / 16f).toInt()
+        val cinY = (VIDEO_HEIGHT - cinHeight) / 2
+        
+        // Draw semi-transparent mask for areas outside 16:9 frame
+        val maskPaint = Paint().apply {
+            color = Color.argb(200, 0, 0, 0)
+            style = Paint.Style.FILL
+        }
+        
+        // Top mask
+        compositionCanvas?.drawRect(0f, 0f, VIDEO_WIDTH.toFloat(), cinY.toFloat(), maskPaint)
+        // Bottom mask
+        compositionCanvas?.drawRect(0f, (cinY + cinHeight).toFloat(), VIDEO_WIDTH.toFloat(), VIDEO_HEIGHT.toFloat(), maskPaint)
+        
+        // Draw frame border (Neo-Brutalist style)
+        val borderPaint = Paint().apply {
+            color = Color.YELLOW
+            style = Paint.Style.STROKE
+            strokeWidth = 3f
+        }
+        compositionCanvas?.drawRect(0f, cinY.toFloat(), VIDEO_WIDTH.toFloat(), (cinY + cinHeight).toFloat(), borderPaint)
+        
+        // Draw corner accents (Neo-Brutalist touch)
+        val cornerSize = 30
+        val cornerPaint = Paint().apply {
+            color = Color.YELLOW
+            style = Paint.Style.STROKE
+            strokeWidth = 4f
+        }
+        
+        // Top-left corner
+        compositionCanvas?.drawLine(0f, cinY.toFloat(), cornerSize.toFloat(), cinY.toFloat(), cornerPaint)
+        compositionCanvas?.drawLine(0f, cinY.toFloat(), 0f, (cinY + cornerSize).toFloat(), cornerPaint)
+        
+        // Top-right corner
+        compositionCanvas?.drawLine((VIDEO_WIDTH - cornerSize).toFloat(), cinY.toFloat(), VIDEO_WIDTH.toFloat(), cinY.toFloat(), cornerPaint)
+        compositionCanvas?.drawLine(VIDEO_WIDTH.toFloat(), cinY.toFloat(), VIDEO_WIDTH.toFloat(), (cinY + cornerSize).toFloat(), cornerPaint)
+        
+        // Bottom-left corner
+        compositionCanvas?.drawLine(0f, (cinY + cinHeight - cornerSize).toFloat(), 0f, (cinY + cinHeight).toFloat(), cornerPaint)
+        compositionCanvas?.drawLine(0f, (cinY + cinHeight).toFloat(), cornerSize.toFloat(), (cinY + cinHeight).toFloat(), cornerPaint)
+        
+        // Bottom-right corner
+        compositionCanvas?.drawLine(VIDEO_WIDTH.toFloat(), (cinY + cinHeight - cornerSize).toFloat(), VIDEO_WIDTH.toFloat(), (cinY + cinHeight).toFloat(), cornerPaint)
+        compositionCanvas?.drawLine((VIDEO_WIDTH - cornerSize).toFloat(), (cinY + cinHeight).toFloat(), VIDEO_WIDTH.toFloat(), (cinY + cinHeight).toFloat(), cornerPaint)
     }
 
     private fun drawToEncoderSurface() {
-        // TODO: Implement surface drawing - requires OpenGL ES or Canvas surface operations
-        // This is a complex operation that involves drawing the composition bitmap to the MediaCodec input surface
-        Log.v(TAG, "Drawing frame to encoder surface")
+        val inputSurface = videoEncodingSurface ?: return
+        val composed = compositionBitmap ?: return
+        val canvas = inputSurface.lockCanvas(null)
+        try {
+            canvas.drawColor(Color.BLACK)
+            val dest = Rect(0, 0, canvas.width, canvas.height)
+            canvas.drawBitmap(composed, null, dest, paint)
+        } finally {
+            inputSurface.unlockCanvasAndPost(canvas)
+        }
     }
 
     private fun startAudioRecording() {
@@ -749,9 +919,153 @@ class VideoComposer(
     }
 
     private fun encodeAudioData(data: ByteArray, length: Int) {
-        // TODO: Implement audio encoding to MediaCodec
-        // This involves feeding PCM data to the audio encoder and reading encoded AAC data
-        Log.v(TAG, "Encoding audio data: $length bytes")
+        val encoder = audioEncoder ?: return
+
+        try {
+            var offset = 0
+
+            while (offset < length && isRecording.get()) {
+                val inputIndex = encoder.dequeueInputBuffer(10_000)
+                if (inputIndex < 0) {
+                    drainAudioEncoder(false)
+                    continue
+                }
+
+                val inputBuffer = encoder.getInputBuffer(inputIndex)
+                if (inputBuffer == null) {
+                    encoder.queueInputBuffer(inputIndex, 0, 0, (System.nanoTime() - audioStartTimeNs) / 1000L, 0)
+                    continue
+                }
+
+                inputBuffer.clear()
+                val writable = inputBuffer.remaining()
+                val toWrite = minOf(writable, length - offset)
+
+                if (toWrite <= 0) {
+                    encoder.queueInputBuffer(inputIndex, 0, 0, (System.nanoTime() - audioStartTimeNs) / 1000L, 0)
+                    break
+                }
+
+                inputBuffer.put(data, offset, toWrite)
+                val ptsUs = (System.nanoTime() - audioStartTimeNs) / 1000L
+                encoder.queueInputBuffer(inputIndex, 0, toWrite, ptsUs, 0)
+                offset += toWrite
+
+                drainAudioEncoder(false)
+            }
+
+            drainAudioEncoder(false)
+        } catch (e: BufferOverflowException) {
+            val probeIndex = encoder.dequeueInputBuffer(0)
+            val cap = if (probeIndex >= 0) encoder.getInputBuffer(probeIndex)?.capacity() ?: -1 else -1
+            Log.e(TAG, "Audio BufferOverflowException: dataLength=$length, codecInputCapacity=$cap", e)
+        } catch (e: Exception) {
+            Log.e(TAG, "Audio encode failure", e)
+        }
+    }
+
+    private fun maybeStartMuxer() {
+        if (!muxerStarted && tracksAdded >= expectedTracks) {
+            mediaMuxer?.start()
+            muxerStarted = true
+            Log.d(TAG, "MediaMuxer started (videoTrack=$videoTrackIndex, audioTrack=$audioTrackIndex)")
+        }
+    }
+
+    private fun drainVideoEncoder(endOfStream: Boolean) {
+        val encoder = videoEncoder ?: return
+        if (endOfStream) {
+            encoder.signalEndOfInputStream()
+        }
+
+        while (true) {
+            val outputIndex = encoder.dequeueOutputBuffer(videoBufferInfo, 0)
+            when {
+                outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    if (!endOfStream) return
+                }
+                outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    if (videoTrackIndex == -1) {
+                        videoTrackIndex = mediaMuxer!!.addTrack(encoder.outputFormat)
+                        tracksAdded++
+                        maybeStartMuxer()
+                    }
+                }
+                outputIndex >= 0 -> {
+                    val encodedData = encoder.getOutputBuffer(outputIndex) ?: run {
+                        encoder.releaseOutputBuffer(outputIndex, false)
+                        continue
+                    }
+
+                    if ((videoBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        videoBufferInfo.size = 0
+                    }
+
+                    if (videoBufferInfo.size > 0 && muxerStarted && videoTrackIndex >= 0) {
+                        encodedData.position(videoBufferInfo.offset)
+                        encodedData.limit(videoBufferInfo.offset + videoBufferInfo.size)
+                        if (videoBufferInfo.presentationTimeUs <= 0L) {
+                            videoBufferInfo.presentationTimeUs = (System.nanoTime() - startTimeNs) / 1000L
+                        }
+                        mediaMuxer?.writeSampleData(videoTrackIndex, encodedData, videoBufferInfo)
+                    }
+
+                    val eos = (videoBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    encoder.releaseOutputBuffer(outputIndex, false)
+                    if (eos) return
+                }
+            }
+        }
+    }
+
+    private fun drainAudioEncoder(endOfStream: Boolean) {
+        val encoder = audioEncoder ?: return
+
+        if (endOfStream) {
+            val inputIndex = encoder.dequeueInputBuffer(10_000)
+            if (inputIndex >= 0) {
+                encoder.queueInputBuffer(inputIndex, 0, 0, (System.nanoTime() - audioStartTimeNs) / 1000L, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
+            }
+        }
+
+        while (true) {
+            val outputIndex = encoder.dequeueOutputBuffer(audioBufferInfo, 0)
+            when {
+                outputIndex == MediaCodec.INFO_TRY_AGAIN_LATER -> {
+                    if (!endOfStream) return
+                }
+                outputIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> {
+                    if (audioTrackIndex == -1) {
+                        audioTrackIndex = mediaMuxer!!.addTrack(encoder.outputFormat)
+                        tracksAdded++
+                        maybeStartMuxer()
+                    }
+                }
+                outputIndex >= 0 -> {
+                    val encodedData = encoder.getOutputBuffer(outputIndex) ?: run {
+                        encoder.releaseOutputBuffer(outputIndex, false)
+                        continue
+                    }
+
+                    if ((audioBufferInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) {
+                        audioBufferInfo.size = 0
+                    }
+
+                    if (audioBufferInfo.size > 0 && muxerStarted && audioTrackIndex >= 0) {
+                        encodedData.position(audioBufferInfo.offset)
+                        encodedData.limit(audioBufferInfo.offset + audioBufferInfo.size)
+                        if (audioBufferInfo.presentationTimeUs <= 0L) {
+                            audioBufferInfo.presentationTimeUs = (System.nanoTime() - audioStartTimeNs) / 1000L
+                        }
+                        mediaMuxer?.writeSampleData(audioTrackIndex, encodedData, audioBufferInfo)
+                    }
+
+                    val eos = (audioBufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0
+                    encoder.releaseOutputBuffer(outputIndex, false)
+                    if (eos) return
+                }
+            }
+        }
     }
 
     private fun createPhotoComposition(): Bitmap {
@@ -809,16 +1123,33 @@ class VideoComposer(
         
         try {
             // Stop audio recording
-            audioRecord?.stop()
+            if (enableAudio) {
+                audioRecord?.stop()
+            }
+
+            // Final drains
+            if (enableAudio) {
+                drainAudioEncoder(true)
+            }
+            drainVideoEncoder(true)
             
             // Stop encoders
             videoEncoder?.stop()
-            audioEncoder?.stop()
+            if (enableAudio) {
+                audioEncoder?.stop()
+            }
             
-            // Stop muxer
+            Log.d(TAG, "All encoders stopped, proceeding to muxer shutdown...")
+            
+            // Stop muxer ONLY after all encoders have finished
             if (muxerStarted) {
-                mediaMuxer?.stop()
-                muxerStarted = false
+                try {
+                    mediaMuxer?.stop()
+                    muxerStarted = false
+                    Log.d(TAG, "MediaMuxer stopped successfully")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error stopping muxer", e)
+                }
             }
             
             Log.d(TAG, "Recording components stopped")
@@ -828,7 +1159,84 @@ class VideoComposer(
         }
         
         // Release resources
-        releaseEncoders()
+         releaseEncoders()
+         
+         // Save video to MediaStore DCIM/UMI-CAM for Gallery visibility
+         saveVideoToGallery()
+         
+         // Trigger media scanner to update Gallery
+         triggerMediaScan()
+    }
+    
+    /**
+     * Save the recorded video to MediaStore DCIM/UMI-CAM directory
+     * This makes the video immediately visible in the device's Gallery/Photos app
+     */
+    private fun saveVideoToGallery() {
+        val sourceFile = outputFile ?: return
+        
+        if (!sourceFile.exists()) {
+            Log.e(TAG, "Source video file does not exist: ${sourceFile.absolutePath}")
+            return
+        }
+        
+        try {
+            val timestamp = System.currentTimeMillis()
+            val displayName = "VID_${timestamp}_dual.mp4"
+            
+            // Create MediaStore entry for DCIM/UMI-CAM
+            val values = ContentValues().apply {
+                put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/UMI-CAM")
+                put(MediaStore.Video.Media.DATE_ADDED, System.currentTimeMillis() / 1000)
+                put(MediaStore.Video.Media.DATE_MODIFIED, System.currentTimeMillis() / 1000)
+            }
+            
+            // Insert into MediaStore and get Uri
+            val uri = context.contentResolver.insert(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                values
+            )
+            
+            if (uri == null) {
+                Log.e(TAG, "Failed to create MediaStore entry for video")
+                return
+            }
+            
+            // Copy video data to MediaStore location via Uri
+            context.contentResolver.openOutputStream(uri)?.use { outputStream ->
+                sourceFile.inputStream().use { inputStream ->
+                    inputStream.copyTo(outputStream)
+                }
+            }
+            
+            Log.d(TAG, "Video saved to MediaStore: $displayName")
+            Log.d(TAG, "Uri: $uri")
+            Log.d(TAG, "File will appear in DCIM/UMI-CAM")
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error saving video to MediaStore", e)
+        }
+    }
+    
+    /**
+     * Trigger media scanner to make the file immediately visible in Photos app
+     */
+    private fun triggerMediaScan() {
+        val filePath = outputFile?.absolutePath ?: return
+        
+        try {
+            MediaScannerConnection.scanFile(
+                context,
+                arrayOf(filePath),
+                arrayOf("video/mp4"),
+                null
+            )
+            Log.d(TAG, "Media scanner triggered for: $filePath")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error triggering media scanner", e)
+        }
     }
 
     private fun releaseEncoders() {
